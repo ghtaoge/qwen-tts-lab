@@ -52,6 +52,9 @@ class FastQwenEngine:
 
     def __init__(self, state_callback=None):
         self._state_callback = state_callback or (lambda **kwargs: None)
+        self.native_gpu = os.environ.get('TTS_DEVICE', 'auto') != 'cpu'
+        if not self.native_gpu:
+            self.backend_name = 'gguf-cpu-stateful-codec'
         self.parts = None
         self.stream = None
         self.decoder = None
@@ -127,7 +130,8 @@ class FastQwenEngine:
         gc.collect()
         self.stream = True
         self.precision = f'Q5_K / Q8_0 · codec {str(self.codec_dtype).split(".")[-1]}'
-        self._state_callback(state='ready', message='Qwen 加速模型已加载', device='Vulkan + ' + self.device,
+        native_device = 'Vulkan' if self.native_gpu else 'GGUF CPU'
+        self._state_callback(state='ready', message='Qwen 加速模型已加载', device=native_device + ' + ' + self.device,
                              precision=self.precision, load_seconds=round(time.perf_counter() - started, 3), error=None)
 
     def _initial_codec_state(self):

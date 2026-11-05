@@ -14,7 +14,20 @@ Qwen3-TTS **0.6B CustomVoice** 本地中文语音项目，包含网页、微信�
 .\start.ps1
 ```
 
-打开 **http://127.0.0.1:8766**。已有环境和加速资产时，直接双击 `start.cmd`。默认启动会在后台加载、预热，等待页面提示“模型已预热”后再比较生成速度。`stop.cmd` 仅停止本项目服务；切换后端、CPU/CUDA或局域网模式前先停止旧服务。
+打开 **http://127.0.0.1:8766**。已有环境和加速资产时，双击 `start.cmd` 或 `start-fast-cpu.cmd` 使用量化CPU后端；`start-cpu.cmd` 使用原版Torch CPU FP32回退。三个入口均将临时目录、Hugging Face缓存及Numba缓存放在项目 `.downloads/` 下。PowerShell的 `start.ps1` 仍默认使用 `-Backend auto -Device auto`，用于自动选择引擎和尝试显卡。
+
+启动会在后台加载、预热，等待页面提示“模型已预热”后再比较生成速度。`stop.cmd` 仅停止本项目服务；切换后端、CPU/CUDA或局域网模式前先停止旧服务。
+
+没有可用显卡时，可使用独立的CPU安装与启动流程：
+
+```powershell
+.\setup.ps1 -Backend CPU -Python C:\Python312\python.exe
+.\download-model.ps1
+.\.venv\Scripts\python.exe tools\prepare_fast_engine.py
+.\start.ps1 -Backend fast -Device cpu
+```
+
+这里的 `-Device cpu` 同时禁用原生Talker/Predictor的Vulkan推理，并让语音解码器使用CPU。状态接口将其标记为 `gguf-cpu-stateful-codec`，避免将量化CPU推理显示为Vulkan。
 
 主模型、PyTorch安装包、下载缓存和导出中间文件均较大，全新安装建议预留约20GB可用磁盘空间；已有模型和主环境时，加速转换仍需额外若干GB。首次下载和CPU转换可能需要一段时间，不属于每次语音生成耗时。模型默认从ModelScope下载，可改为 `download-model.ps1 -Source huggingface`；本地目录包含 `speech_tokenizer`，推理时不再下载模型。
 
@@ -27,7 +40,7 @@ Qwen3-TTS **0.6B CustomVoice** 本地中文语音项目，包含网页、微信�
 | 选择 | 实现 | 行为 |
 |---|---|---|
 | `auto`，默认 | 资产齐全时使用加速后端，否则使用原版Torch | `/api/status` 的 `backend` 显示实际选择 |
-| `fast` | Talker Q5_K、Predictor Q8_0 GGUF；Vulkan原生推理；原始有状态语音解码器 | 同一句内持续输出PCM片段，优先生成速度 |
+| `fast` | Talker Q5_K、Predictor Q8_0 GGUF；Vulkan或CPU原生推理；原始有状态语音解码器 | 同一句内持续输出PCM片段，优先生成速度 |
 | `torch` | 官方Qwen-TTS Python/PyTorch推理 | 保留原版回退路径，按句输出音频 |
 
 量化会改变数值计算，输出不保证与原版逐样本一致；这里没有更换成其他TTS模型。加速后端基于 [Qwen3-TTS-GGUF](https://github.com/HaujetZhao/Qwen3-TTS-GGUF) 的固定提交和官方 [llama.cpp b10621](https://github.com/ggml-org/llama.cpp/releases/tag/b10621) Windows Vulkan二进制。下载二进制会校验固定SHA256。
@@ -49,11 +62,13 @@ Windows上的Vulkan原生推理与PyTorch使用不同OpenMP运行库，因此加
 
 **两种后端都不依赖FlashAttention。** 原版Torch使用SDPA；支持GPU BF16时默认BF16，否则使用FP32。加速后端的GGUF精度固定，解码器在支持BF16的CUDA显卡上使用BF16，其余使用FP32；`-Precision` 参数用于原版Torch。FP16曾在本机触发GPU执行异常，因此不是默认方案。`setup.ps1 -Backend CPU/CUDA` 选择安装的Torch构建，`start.ps1 -Backend auto/fast/torch` 选择运行引擎。
 
-**GTX 1050 Ti尚未实测。** 它不支持原生GPU BF16，不能套用下述RTX 3050结果。可以单独尝试Vulkan加速后端并检查运行、显存和速度；原版回退可先用CPU FP32，原版CUDA FP32在4GB显存下可能不足。加速安装脚本当前验证的平台是Windows x64与Python 3.12，需要可用的Vulkan显卡驱动。
+**GTX 1050 Ti的GPU推理尚未实测。** 已在i5-8300H、32GB内存、GTX 1050 Ti 4GB的电脑上验证量化CPU模式；当前430.81驱动下，原生加速库未列出该NVIDIA显卡，因此这些CPU结果不代表GPU速度。相同短句、关闭缓存时，纯推理由原版约22.57秒降到8.56～8.84秒，首段约1.91～1.93秒可用，详见 `TEST_RESULTS.md`。
+
+GTX 1050 Ti不支持原生GPU BF16，不能套用下述RTX 3050结果。可以单独尝试Vulkan加速后端并检查运行、显存和速度；原版回退可先用CPU FP32，原版CUDA FP32在4GB显存下可能不足。加速安装脚本当前验证的平台是Windows x64与Python 3.12；使用Vulkan推理需要兼容的显卡驱动，量化CPU模式不要求可用的Vulkan设备。
 
 ## 真实速度与计时口径
 
-当前实际测试机器是 **RTX 3050 Laptop 4GB、i5-11260H、约16GB内存**，与对话中提到的1050 Ti/i5八代/32GB不同。以下均为Serena、1.0倍速、关闭缓存的真实生成：
+以下既有GPU测试来自 **RTX 3050 Laptop 4GB、i5-11260H、约16GB内存**，与上文CPU测试使用不同机器，结果分别记录。以下均为Serena、1.0倍速、关闭缓存的真实生成：
 
 | 场景 | 首段可用或下载 | 完整生成/接收 | 音频时长 |
 |---|---|---|---|
