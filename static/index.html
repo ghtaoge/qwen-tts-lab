@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Qwen Voice Lab · 本地语音实验室</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/"><span class="brand-icon">Q</span><span>Qwen Voice<span class="brand-sub">LOCAL AUDIO LAB</span></span></a>
+    <div class="nav-label">工作空间</div>
+    <div class="nav-item selected"><span>◉</span> 语音合成 <span class="nav-count">01</span></div>
+    <button class="nav-item" id="historyNav"><span>◷</span> 最近生成</button>
+    <a class="nav-item" href="/docs" target="_blank" rel="noreferrer"><span>⌘</span> 接口文档 <span class="arrow">↗</span></a>
+    <div class="side-bottom">
+      <div class="runtime-title"><span class="dot" id="statusDot"></span><span id="runtimeLabel">连接本地服务</span></div>
+      <div class="hardware-name" id="gpuName">正在检测运行环境…</div>
+      <div class="hardware-detail" id="hardwareDetail">Qwen3-TTS · 0.6B CustomVoice</div>
+      <div class="hardware-note" id="engineDetail">模型按需加载，首次生成需要等待。</div>
+      <button class="load-button" id="loadModel">加载并预热模型 <span>↗</span></button>
+      <div class="privacy"><span>⌂</span> 文字与音频在本机处理</div>
+    </div>
+  </aside>
+  <main>
+    <header><div class="breadcrumb">实验室 <span>/</span> 语音合成</div><span class="local-badge"><span class="dot green"></span> LOCAL FIRST</span></header>
+    <section class="page-heading"><div><div class="eyebrow">TEXT TO SPEECH</div><h1>让文字，有自己的声音<span>。</span></h1><p>选择一个声音，把想说的话交给 Qwen。</p></div><div class="model-pill">Qwen3-TTS <strong>0.6B</strong></div></section>
+    <div class="workspace">
+      <section class="composer card">
+        <div class="section-heading"><h2><span class="step">01</span> 输入文字</h2><span class="subtle">最长 300 字符</span></div>
+        <div class="editor-wrap"><label class="sr-only" for="text">待朗读文字</label><textarea id="text" maxlength="300" spellcheck="false" placeholder="在这里输入你想听到的文字…">你好，欢迎来到我的语音实验室。今天也要保持好心情，去发现生活里的小美好。</textarea><div class="editor-footer"><span>中文优先 · 按句生成</span><span><b id="charCount">0</b> / 300</span></div></div>
+        <div class="examples"><span>试一试</span><button data-example="你好，欢迎回家。现在是下午三点，记得喝水，休息一下。">日常提醒 ↗</button><button data-example="重庆的银行行长介绍了新的业务流程。今天的温度是二十三点五摄氏度。">中文发音 ↗</button><button data-example="早上好！新的一天开始了，让我们一起出发，去遇见更多美好的事情。">清晨问候 ↗</button></div>
+        <div class="section-heading voice-heading"><h2><span class="step">02</span> 选择音色</h2><span class="subtle">内置声音，无需训练</span></div>
+        <div id="voiceGrid" class="voice-grid" role="radiogroup" aria-label="内置中文音色"></div>
+        <div class="more-controls"><label>更多音色<select id="moreVoice"><option value="">选择其他语言音色</option></select></label><label>朗读语言<select id="language"><option value="Chinese">中文</option><option value="English">英语</option><option value="Japanese">日语</option><option value="Korean">韩语</option><option value="Auto">自动识别</option></select></label></div>
+        <div class="control-row"><label for="speed">语速 <output id="speedValue">1.00×</output><input id="speed" type="range" min="0.75" max="1.5" value="1" step="0.05"><span class="range-labels"><span>舒缓 0.75×</span><span>轻快 1.50×</span></span></label><label for="volume">试听音量 <output id="volumeValue">80%</output><input id="volume" type="range" min="0" max="100" value="80"><span class="range-labels"><span>仅影响网页播放</span><span>100%</span></span></label></div>
+        <div class="device-option"><label><input type="checkbox" id="sendDevice"> 同时发送到 ESP32</label><span class="device-status" id="deviceStatus">设备状态检测中</span></div>
+        <div class="action-row"><label class="cache-option"><input id="useCache" type="checkbox" checked> 复用相同内容缓存</label><button class="primary" id="generate"><span>✦</span> 生成语音 <span class="shortcut">Ctrl ↵</span></button></div>
+        <div id="errorBox" class="error-box" role="alert" hidden></div>
+      </section>
+      <aside class="right-column">
+        <section class="card output-card"><div class="section-heading"><h2><span class="step">03</span> 听听效果</h2><span id="outputBadge" class="output-badge">等待生成</span></div>
+          <div class="voice-visual"><div class="visual-orbit orbit-a"></div><div class="visual-orbit orbit-b"></div><div class="voice-sphere"><svg width="62" height="52" viewBox="0 0 62 52" fill="none" aria-hidden="true"><path d="M7 22v8m8-16v24m8-33v42m8-36v30m8-41v52m8-37v22m8-17v12" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"/></svg></div><span class="visual-caption" id="visualCaption">每一个想法，都值得被听见</span></div>
+          <canvas id="waveform" width="720" height="96" aria-label="生成音频波形"></canvas>
+          <audio id="player" controls preload="metadata"></audio>
+          <div class="output-actions"><label><input id="autoPlay" type="checkbox"> 首包就绪即连续试听</label><a id="download" class="download disabled" aria-disabled="true">下载 WAV ↓</a></div>
+          <div id="streamControls" class="stream-controls" hidden><span id="streamState">等待音频首包</span><button id="stopStream" type="button">停止试听</button></div>
+          <p class="output-note" id="outputNote">生成后可试听、下载，也能直接交给开发板播放。</p>
+          <div id="parts" class="parts"></div>
+        </section>
+        <section class="card metrics-card"><div class="section-heading"><h2>性能观察</h2><span id="timer" class="timer">—</span></div><div class="metrics-grid"><div><span>服务首包可用</span><strong id="metricFirst">—</strong></div><div><span>纯推理耗时</span><strong id="metricInference">—</strong></div><div><span>网页开始试听</span><strong id="metricBrowserFirst">—</strong></div><div><span>ESP32 开始播放</span><strong id="metricDeviceFirst">—</strong></div><div><span>音频时长</span><strong id="metricDuration">—</strong></div><div><span>实时率 RTF</span><strong id="metricRtf">—</strong></div></div><div class="metrics-footer"><span id="metricMemory">峰值显存：—</span><span id="metricFormat">PCM WAV</span></div><p id="metricTiming" class="metric-tip">排队：— · ESP32 下载首包：—</p><p class="metric-tip">首包可用与整段生成耗时分别记录。网页试听从本次点击计时；设备播放时间来自固件首次写入 I²S 的确认，离线或未确认时显示 —。RTF 小于 1 才能持续生成快于播放。</p></section>
+      </aside>
+    </div>
+    <section class="history-section" id="historySection"><div class="section-heading"><h2>最近生成 <span id="historyCount" class="history-count">0</span></h2><button class="text-button" id="refreshHistory">刷新 ↻</button></div><div id="historyList" class="history-list"><div class="history-empty">还没有作品，试着生成第一段声音。</div></div></section>
+    <footer>QWEN VOICE LAB <span>本地推理 · 中文音色 · ESP32-S3</span></footer>
+  </main>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script src="/stream-audio.js"></script><script src="/app.js"></script>
+</body></html>

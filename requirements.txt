@@ -1,0 +1,11 @@
+# Install torch/torchaudio from the CUDA 12.6 index first (see setup.ps1).
+torch==2.7.1
+torchaudio==2.7.1
+qwen-tts==0.1.1
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+soundfile>=0.13,<1
+imageio-ffmpeg>=0.6,<1
+httpx>=0.28,<1
+pytest>=8,<10
+modelscope>=1.23,<2
