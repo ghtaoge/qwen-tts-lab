@@ -4,16 +4,18 @@ let selectedVoice = 'Serena', voiceList = [], currentJob = null, pollHandle = nu
 let timerHandle = null, jobStarted = 0, currentAudioUrl = '', autoActive = false, refreshBusy = false;
 let browserFirstSeconds = null, lastHistoryRefresh = 0, pollFailures = 0, manualAudioSelection = false, submitting = false;
 let pollEpoch = 0, renderedPartJob = null, renderedPartUrls = [];
+let autoPlaybackJob = null;
 const streamPlayer = new StreamAudioPlayer({
+  fetchTimeoutMs: 30000,
   onFirstAudio(delay) {
     if (browserFirstSeconds == null && jobStarted) {
       browserFirstSeconds = (performance.now() - jobStarted) / 1000 + delay;
       $('metricBrowserFirst').textContent = secs(browserFirstSeconds);
     }
   },
-  onState(state, index) {
+  onState(state) {
     $('streamControls').hidden = false;
-    $('streamState').textContent = state === 'waiting' ? '等待下一段音频，已就绪即播放' : state === 'playing' ? `连续试听 · 第 ${index} 段` : '连续试听已完成';
+    $('streamState').textContent = state === 'waiting' ? (autoPlaybackJob ? '正在缓冲完整语音…' : '等待全部转换完成后自动播放') : state === 'playing' ? '正在播放完整语音' : '播放完成，可在播放器中再次播放';
     if (state === 'completed') {
       autoActive = false;
       if(currentJob?.audio_url && !manualAudioSelection)setAudio(currentJob.audio_url);
@@ -22,7 +24,8 @@ const streamPlayer = new StreamAudioPlayer({
   onError(error) {
     autoActive = false;
     $('streamState').textContent = '自动试听已停止';
-    toast('连续试听失败：' + error.message + '。可点击分段按钮手动试听。');
+    if(currentJob?.status==='completed' && !manualAudioSelection)setAudio(currentJob.audio_url);
+    toast('自动播放未能开始：' + error.message + '。转换完成后可点击播放器试听。');
   }
 });
 const labels = { queued:'排队中', loading:'加载模型', synthesizing:'合成中', completed:'已完成', failed:'失败', cancelled:'已停止' };
@@ -100,10 +103,29 @@ async function drawWave(url) {
 function setAudio(url, play=false) {
   if (!url) return;
   if (currentAudioUrl!==url) {currentAudioUrl=url;$('player').src=url;drawWave(url);}
-  if (play) $('player').play().catch(()=>toast('浏览器阻止了自动播放，请点击播放器开始试听。'));
+  if (play) {
+    try { $('player').currentTime=0; } catch { /* Metadata may still be loading. */ }
+    $('player').play().catch(()=>toast('浏览器阻止了自动播放，请点击播放器开始试听。'));
+  }
 }
 function stopAuto() {
   autoActive=false;streamPlayer.stop();$('streamControls').hidden=true;
+}
+function playCompletedJob(job) {
+  if(!autoActive || !job || job.status!=='completed' || !job.audio_url || manualAudioSelection || document.hidden || autoPlaybackJob===job.id)return;
+  autoPlaybackJob=job.id;
+  $('streamState').textContent='正在缓冲完整语音…';
+  // Feed one merged file only. Playback starts after the entire WAV is downloaded
+  // and decoded, so inference speed and sentence boundaries cannot interrupt it.
+  streamPlayer.update([{index:1,audio_url:job.audio_url,duration:job.duration}],true);
+}
+function armAuto(job=currentJob) {
+  stopAuto();autoPlaybackJob=null;
+  if(document.hidden)return;
+  autoActive=true;
+  $('streamControls').hidden=false;$('streamState').textContent='等待全部转换完成后自动播放';
+  // Unlock Web Audio inside the user gesture, without waiting for synthesis.
+  streamPlayer.start();playCompletedJob(job);
 }
 function renderParts(job){
   const target=$('parts'),parts=job.parts||[];
@@ -114,15 +136,17 @@ function renderParts(job){
     button.onclick=()=>{stopAuto();manualAudioSelection=true;setAudio(part.audio_url,true);};target.append(button);renderedPartUrls.push(part.audio_url);
   }
 }
-$('player').addEventListener('play',()=>{if(autoActive)stopAuto();if(browserFirstSeconds==null&&jobStarted){browserFirstSeconds=(performance.now()-jobStarted)/1000;$('metricBrowserFirst').textContent=secs(browserFirstSeconds);}});
+$('player').addEventListener('play',()=>{stopAuto();manualAudioSelection=true;if(browserFirstSeconds==null&&jobStarted){browserFirstSeconds=(performance.now()-jobStarted)/1000;$('metricBrowserFirst').textContent=secs(browserFirstSeconds);}});
 $('stopStream').onclick=stopAuto;
 $('autoPlay').addEventListener('change',()=>{
   if(!$('autoPlay').checked){stopAuto();return;}
   if(currentJob && !['failed','cancelled'].includes(currentJob.status)) {
-    $('player').pause();autoActive=true;
-    streamPlayer.start();streamPlayer.update(currentJob.parts,currentJob.status==='completed');
+    $('player').pause();manualAudioSelection=false;armAuto();
   }
 });
+function pauseForBackground(){stopAuto();$('player').pause();}
+document.addEventListener('visibilitychange',()=>{if(document.hidden)pauseForBackground();});
+if(typeof window!=='undefined')window.addEventListener('pagehide',pauseForBackground);
 function renderJob(job) {
   currentJob=job;
   const running=!['completed','failed','cancelled'].includes(job.status);
@@ -130,28 +154,27 @@ function renderJob(job) {
   $('outputBadge').textContent=job.cache_hit?'缓存命中':labels[job.status]||job.status;
   $('visualCaption').textContent=job.stage;
   document.querySelector('.voice-visual').classList.toggle('busy',running);
-  $('metricFirst').textContent=secs(job.first_audio_seconds);
+  $('metricFirst').textContent=secs(job.playback_ready_seconds ?? job.first_audio_seconds);
   $('metricBrowserFirst').textContent=secs(browserFirstSeconds);
   $('metricDeviceFirst').textContent=secs(job.device_first_audio_seconds);
-  $('metricTiming').textContent=`排队：${secs(job.queued_seconds)} · ${job.device_delivery_simulated?'模拟接收器':'ESP32'} 下载首包：${secs(job.device_download_seconds)}`;
+  $('metricTiming').textContent=`排队：${secs(job.queued_seconds)} · ${job.device_delivery_simulated?'模拟接收器':'ESP32'} 音频下载：${secs(job.device_download_seconds)}`;
   $('metricInference').textContent=secs(job.inference_seconds);
   $('metricDuration').textContent=secs(job.duration);
   $('metricRtf').textContent=job.rtf==null?'—':Number(job.rtf).toFixed(2);
   $('metricMemory').textContent='峰值显存：'+(job.peak_vram_mb==null?'—':`${job.peak_vram_mb} MB`);
   $('metricFormat').textContent=job.sample_rate?`${job.sample_rate/1000} kHz · PCM16`:'PCM WAV';
-  renderParts(job);
+  renderParts(job.status==='completed'?job:{...job,parts:[]});
   if(autoActive) {
     if(['failed','cancelled'].includes(job.status))stopAuto();
-    else streamPlayer.update(job.parts,job.status==='completed');
+    else playCompletedJob(job);
   }
-  if(job.parts.length && !currentAudioUrl && !autoActive && job.status!=='completed')setAudio(job.parts[0].audio_url);
   if(job.status==='completed') {
-    if(!autoActive && !manualAudioSelection) setAudio(job.audio_url);
+    if(!manualAudioSelection) setAudio(job.audio_url);
     $('download').href=job.audio_url;$('download').download=`${job.voice}-${job.id.slice(0,8)}.wav`;
     $('download').classList.remove('disabled');$('download').setAttribute('aria-disabled','false');
     $('outputNote').textContent=job.cache_hit?'本次直接复用已有音频，耗时不代表模型推理性能。':`合计 ${secs(job.total_seconds)}（含本次加载与后处理）；${job.engine_device||''} ${job.precision||''}。`;
     if(job.delivery)$('outputNote').textContent+=' '+deliveryText(job)+(job.device_error?'：'+job.device_error:'');
-  } else {$('outputNote').textContent=running?'分段就绪后即可试听，完整音频将在全部生成后提供。':job.status==='cancelled'?'任务已停止，已完成片段仍可试听。':'本次未生成完整音频。';}
+  } else {$('outputNote').textContent=running?(autoActive?'正在转换，全部完成并缓冲完整语音后自动播放。':'正在转换，全部完成后可点击播放器试听。'):job.status==='cancelled'?'任务已停止，重新生成后可播放完整语音。':'本次未生成完整音频。';}
   showError(job.error);
   if(!running){clearInterval(timerHandle);$('timer').textContent=secs(job.total_seconds);}
 }
@@ -187,11 +210,11 @@ async function submit() {
   const text=$('text').value.trim();if(!text){showError('请先输入要朗读的文字。');$('text').focus();return;}
   submitting=true;showError('');$('generate').disabled=true;clearTimeout(pollHandle);clearInterval(timerHandle);
   stopAuto();$('player').pause();currentJob=null;browserFirstSeconds=null;manualAudioSelection=false;pollFailures=0;jobStarted=performance.now();
-  // Unlock Web Audio inside the user's click, before waiting for model/network work.
+  $('player').removeAttribute?.('src');$('player').load?.();currentAudioUrl='';renderParts({id:null,parts:[]});
   const wantsAuto=$('autoPlay').checked;
-  if(wantsAuto){autoActive=true;streamPlayer.start();}
+  if(wantsAuto)armAuto();
   try {
-    const job=await api('/api/jobs',{method:'POST',body:JSON.stringify({text,voice:selectedVoice,language:$('language').value,speed:Number($('speed').value),use_cache:$('useCache').checked,display_mode:displayMode(),device_id:$('sendDevice').checked?($('sendDevice').dataset.device||'esp32_01'):null})});
+    const job=await api('/api/jobs',{method:'POST',body:JSON.stringify({text,voice:selectedVoice,language:$('language').value,speed:Number($('speed').value),use_cache:$('useCache').checked,playback_mode:'complete',display_mode:displayMode(),device_id:$('sendDevice').checked?($('sendDevice').dataset.device||'esp32_01'):null})});
     $('player').pause();$('player').removeAttribute('src');$('player').load();currentAudioUrl='';drawWave(null);
     $('download').removeAttribute('href');$('download').classList.add('disabled');$('download').setAttribute('aria-disabled','true');
     timerHandle=setInterval(()=>$('timer').textContent=secs((performance.now()-jobStarted)/1000),100);
@@ -210,10 +233,11 @@ async function refreshHistory() {
       const meta=document.createElement('div');meta.className='history-meta';meta.textContent=`${voiceName(job.voice)} · ${job.speed.toFixed(2)}× · ${labels[job.status]||job.status}${job.cache_hit?' · 缓存':''}${job.delivery?' · '+deliveryText(job):''}`;
       body.append(text,meta);const time=document.createElement('span');time.className='history-time';time.textContent=new Date(job.created_at*1000).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});row.append(icon,body,time);
       row.onclick=()=>{
+        if(submitting){toast('正在提交任务，请稍候。');return;}
         if(currentJob&&!['completed','failed','cancelled'].includes(currentJob.status)&&currentJob.id!==job.id){toast('请先等待或停止当前任务。');return;}
         const selected=currentJob?.id===job.id?currentJob:job;
         clearTimeout(pollHandle);clearInterval(timerHandle);stopAuto();browserFirstSeconds=null;manualAudioSelection=false;pollFailures=0;jobStarted=0;$('text').value=selected.text;updateCount();chooseVoice(selected.voice);$('speed').value=selected.speed;updateSpeed();$('language').value=selected.language;$('displayMode').value=selected.display_mode||'buddy';updateDisplayMode();renderJob(selected);
-        if(selected.audio_url)setAudio(selected.audio_url,true);pollJob(selected.id);window.scrollTo({top:0,behavior:'smooth'});
+        if(selected.status==='completed' && selected.audio_url)setAudio(selected.audio_url,true);pollJob(selected.id);window.scrollTo({top:0,behavior:'smooth'});
       };target.append(row);
     });
   }catch(error){console.warn(error);}

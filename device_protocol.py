@@ -61,16 +61,19 @@ def create_device_router(*, config: dict, get_jobs: Callable, get_devices: Calla
 
     def snapshot(device_id: str, job: dict, after: int):
         record = device_record(device_id)
+        playback_ready = bool(job.get('status') == 'completed' and job.get('audio_url'))
+        complete_only = job.get('playback_mode', 'complete') != 'stream'
         if job.get('delivery') in final_delivery:
             # A delayed request carrying the old valid token must not receive
             # audio again after an ACK or error. Keep this lease readable only
             # as a closed manifest so the old player stops safely.
             return {'id': job['id'], 'status': job.get('status'), 'parts': [],
-                    'available_parts': len(job.get('parts', [])), 'finished': True,
+                    'available_parts': len(job.get('parts', [])) if not complete_only or playback_ready else 0, 'finished': True,
                     'cancel': True, 'error': job.get('device_error') if job.get('delivery') == 'error' else None,
                     'volume': record['volume'], 'poll_after_ms': 60, 'delivery_closed': True,
-                    'display_mode': job.get('display_mode', 'buddy')}
-        source = list(job.get('parts', []))
+                    'display_mode': job.get('display_mode', 'buddy'),
+                    'playback_mode': job.get('playback_mode', 'complete'), 'playback_ready': playback_ready}
+        source = list(job.get('parts', [])) if not complete_only or playback_ready else []
         # Backward compatibility for an old completed cache with only one WAV.
         if not source and job.get('status') == 'completed' and job.get('audio_url'):
             source = [{'index': 1, 'audio_url': job['audio_url'],
@@ -85,6 +88,7 @@ def create_device_router(*, config: dict, get_jobs: Callable, get_devices: Calla
             'cancel': cancelled, 'error': job.get('error') if job.get('status') == 'failed' else None,
             'volume': record['volume'], 'poll_after_ms': 60,
             'display_mode': job.get('display_mode', 'buddy'),
+            'playback_mode': job.get('playback_mode', 'complete'), 'playback_ready': playback_ready,
         }
 
     @router.get('/{device_id}/next')
@@ -122,10 +126,15 @@ def create_device_router(*, config: dict, get_jobs: Callable, get_devices: Calla
                         return {'task': {
                             'id': job['id'], 'lease': job['lease'], 'text': job['text'],
                             'manifest_url': f"/api/device/{device_id}/jobs/{job['id']}/manifest",
-                            'audio_url': job.get('audio_url'), 'sample_rate': job.get('sample_rate'),
+                            'audio_url': job.get('audio_url') if (
+                                job.get('playback_mode', 'complete') == 'stream'
+                                or job.get('status') == 'completed') else None,
+                            'sample_rate': job.get('sample_rate'),
                             'volume': get_devices()[device_id]['volume'], 'protocol': 2,
                             'created_at': job['created_at'],
                             'display_mode': job.get('display_mode', 'buddy'), 'status': job.get('status'),
+                            'playback_mode': job.get('playback_mode', 'complete'),
+                            'playback_ready': bool(job.get('status') == 'completed' and job.get('audio_url')),
                         }}
             if time.monotonic() >= deadline:
                 return {'task': None}

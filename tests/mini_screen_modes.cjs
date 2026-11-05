@@ -12,7 +12,7 @@ const page=Object.assign({},definition,{alive:true,data:{...definition.data,text
     const before=sent.length;page.selectDisplayMode({currentTarget:{dataset:{id:mode}}});
     assert.equal(sent.length,before,'mode selection must not create an extra network request');
     page.data.busy=false;await page.generate();
-    assert.equal(sent.at(-1).body.display_mode,mode);assert.equal(sent.at(-1).url,'/api/jobs');
+    assert.equal(sent.at(-1).body.display_mode,mode);assert.equal(sent.at(-1).body.playback_mode,'complete');assert.equal(sent.at(-1).url,'/api/jobs');
   }
   page.selectDisplayMode({currentTarget:{dataset:{id:'unknown'}}});assert.equal(page.data.displayMode,'text');
   const actual=Object.assign({},definition,{alive:true,data:{},setData(update){Object.assign(this.data,update);},resetPlayback(){},refreshHistory(){}});

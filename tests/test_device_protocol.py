@@ -29,7 +29,8 @@ def protocol():
 
 def job(id='a', **extra):
     return {'id': id, 'created_at': time.time(), 'device_id': 'board',
-            'text': '你好，开始显示。', 'status': 'queued', 'parts': [], 'delivery': 'pending', **extra}
+            'text': '你好，开始显示。', 'status': 'queued', 'parts': [], 'delivery': 'pending',
+            'playback_mode': 'stream', **extra}
 
 
 def claim(client):

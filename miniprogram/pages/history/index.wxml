@@ -1,0 +1,30 @@
+<view class="page">
+  <view class="page-header">
+    <view><view class="title">语音记录</view><text class="subtitle">已生成的语音，随时再听。</text></view>
+    <button class="refresh-button" loading="{{loading}}" disabled="{{loading}}" bindtap="refreshHistory">刷新</button>
+  </view>
+  <view class="error" wx:if="{{error}}">{{error}}</view>
+  <view class="empty" wx:if="{{!loading && history.length===0}}">
+    <view class="empty-mark">♪</view>
+    <view class="empty-title">还没有语音记录</view>
+    <view class="empty-copy">生成第一条语音后，就可以在这里重播。</view>
+    <button class="empty-button" bindtap="goGenerate">去生成语音</button>
+  </view>
+  <view class="loading-copy" wx:if="{{loading && history.length===0}}">正在加载记录…</view>
+  <view class="record" wx:for="{{history}}" wx:key="key">
+    <view class="record-heading"><text class="voice-label">{{item.voiceLabel}}</text><text class="time-label">{{item.timeLabel}}</text></view>
+    <view class="record-text {{expandedKey===item.key?'expanded':''}}" data-id="{{item.id}}" bindtap="toggleExpand">{{item.text}}</view>
+    <view class="record-meta"><text>{{item.durationLabel}}</text><text class="status {{item.canReplay?'ready':''}}">{{item.statusLabel}}</text></view>
+    <view class="record-details" wx:if="{{expandedKey===item.key}}">
+      <text>{{item.speed}} 倍速 · 点击文字收起</text>
+      <text class="detail-error" wx:if="{{item.detailError}}">{{item.detailError}}</text>
+    </view>
+    <view class="record-actions">
+      <button class="phone-button {{playingKey===item.key?'playing':''}}" data-id="{{item.id}}" catchtap="playPhone" disabled="{{!item.canReplay || downloadingKey===item.key}}" loading="{{downloadingKey===item.key}}">{{playingKey===item.key?'从头重播':downloadingKey===item.key?'正在下载':'手机重播'}}</button>
+      <button class="device-button" data-id="{{item.id}}" catchtap="replayDevice" disabled="{{!item.canReplay || (replayBusy && (replayKey!==item.key || !canStopReplay))}}" loading="{{replayBusy && replayKey===item.key && !canStopReplay}}">{{replayBusy && replayKey===item.key?(canStopReplay?'停止开发板':'处理中'):'开发板重播'}}</button>
+    </view>
+    <button class="stop-phone" wx:if="{{playingKey===item.key || downloadingKey===item.key}}" catchtap="stopPhone">停止手机播放</button>
+    <view class="device-status {{item.deviceFailed?'failed':''}}" wx:if="{{item.deviceLabel}}">{{item.deviceLabel}}</view>
+  </view>
+  <view class="list-note" wx:if="{{history.length}}">显示最近记录，重复播放合并展示。</view>
+</view>

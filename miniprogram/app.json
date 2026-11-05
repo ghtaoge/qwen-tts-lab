@@ -1,1 +1,37 @@
-{"pages":["pages/index/index"],"window":{"navigationBarTitleText":"Qwen 语音实验室","navigationBarBackgroundColor":"#f6f7fa","navigationBarTextStyle":"black","backgroundColor":"#f6f7fa"},"style":"v2","sitemapLocation":"sitemap.json"}
+{
+  "pages": [
+    "pages/index/index",
+    "pages/history/index",
+    "pages/device/index",
+    "pages/settings/index"
+  ],
+  "window": {
+    "navigationBarTitleText": "Qwen 语音",
+    "navigationBarBackgroundColor": "#f6f7fa",
+    "navigationBarTextStyle": "black",
+    "backgroundColor": "#f6f7fa"
+  },
+  "tabBar": {
+    "custom": true,
+    "color": "#777385",
+    "selectedColor": "#6047bd",
+    "backgroundColor": "#ffffff",
+    "borderStyle": "white",
+    "list": [
+      {
+        "pagePath": "pages/index/index",
+        "text": "生成"
+      },
+      {
+        "pagePath": "pages/history/index",
+        "text": "记录"
+      },
+      {
+        "pagePath": "pages/device/index",
+        "text": "设备"
+      }
+    ]
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}

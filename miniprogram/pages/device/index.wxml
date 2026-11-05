@@ -1,0 +1,41 @@
+<view class="device-page">
+  <view class="page-heading">设备</view>
+  <view class="page-description">管理开发板的播放和屏幕。</view>
+
+  <view class="device-card">
+    <view class="device-top">
+      <view class="device-name">{{deviceName}}</view>
+      <view class="connection-badge {{deviceOnline?'online':''}}">{{loading?'连接中':deviceOnline?'在线':'离线'}}</view>
+    </view>
+    <view class="device-state">{{deviceState}}</view>
+    <view wx:if="{{deviceSimulated}}" class="helper">当前连接的是模拟接收器。</view>
+    <view wx:if="{{!deviceOnline && !loading}}" class="helper">确认开发板已上电，并连接到电脑所在的网络。</view>
+    <view class="volume-title"><text>播放音量</text><text class="volume-value">{{deviceVolume}}%</text></view>
+    <slider min="0" max="100" value="{{deviceVolume}}" activeColor="#6750bd" backgroundColor="#e7e3f1" block-size="28" bindchanging="volumeChanging" bindchange="changeVolume"/>
+    <view class="volume-caption"><text>静音</text><text>{{volumeSaving?'正在保存…':'最大音量'}}</text></view>
+    <button wx:if="{{canStop}}" class="stop-button" loading="{{stopBusy}}" disabled="{{stopBusy}}" bindtap="stopPlayback">停止当前播放</button>
+  </view>
+
+  <view class="device-card">
+    <view class="section-title">屏幕显示</view>
+    <view class="helper section-description">在下次生成或重播时使用。</view>
+    <button wx:for="{{displayModes}}" wx:key="id" class="mode-option {{displayMode===item.id?'selected':''}}" data-id="{{item.id}}" bindtap="selectDisplayMode">
+      <view class="mode-copy"><view class="mode-name">{{item.name}}</view><view class="mode-hint">{{item.hint}}</view></view>
+      <text class="mode-check">{{displayMode===item.id?'✓':''}}</text>
+    </button>
+  </view>
+
+  <button class="settings-link" bindtap="openSettings"><text>连接设置</text><text class="link-arrow">›</text></button>
+  <view wx:if="{{error}}" class="error-message">{{error}}</view>
+
+  <view class="advanced">
+    <button class="advanced-toggle" bindtap="toggleAdvanced"><text>更多设置</text><text>{{advancedOpen?'收起 −':'展开 +'}}</text></button>
+    <view wx:if="{{advancedOpen}}" class="advanced-body">
+      <view class="preference-row"><view><view>复用已生成音频</view><view class="helper">相同内容优先使用缓存。</view></view><switch checked="{{useCache}}" color="#6750bd" bindchange="toggleCache"/></view>
+      <view class="helper">语音全部生成完成后，在所选设备自动播放；手机支持反复重播。</view>
+      <view class="model-info"><view>{{modelState}}</view><view class="helper">{{hardware}}</view></view>
+      <button class="warmup-button" loading="{{warmupBusy}}" disabled="{{!connected || warmupBusy || activeJobs>0}}" bindtap="loadModel">加载并预热模型</button>
+      <view wx:if="{{activeJobs>0}}" class="helper warmup-hint">当前任务完成后可重新预热。</view>
+    </view>
+  </view>
+</view>

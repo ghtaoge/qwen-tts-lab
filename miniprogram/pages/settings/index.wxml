@@ -1,0 +1,17 @@
+<view class="settings-page">
+  <view class="page-heading">连接电脑服务</view>
+  <view class="page-description">手机、电脑和开发板需处于可互通的局域网。</view>
+  <view class="settings-card">
+    <label class="field-label" for="baseUrl">电脑服务地址</label>
+    <input id="baseUrl" value="{{baseUrl}}" data-key="baseUrl" bindinput="settingInput" placeholder="http://192.168.1.100:8766" placeholder-class="input-placeholder" maxlength="200" disabled="{{saving}}"/>
+    <view class="field-hint">填写电脑的局域网地址，例如上面的格式。</view>
+    <label class="field-label" for="clientToken">客户端令牌</label>
+    <input id="clientToken" value="{{clientToken}}" password="{{true}}" data-key="clientToken" bindinput="settingInput" placeholder="粘贴 client_token" placeholder-class="input-placeholder" maxlength="256" disabled="{{saving}}"/>
+    <view class="field-hint">在电脑项目的 server.local.json 中查看 client_token。</view>
+    <label class="field-label" for="deviceId">设备编号</label>
+    <input id="deviceId" value="{{deviceId}}" data-key="deviceId" bindinput="settingInput" placeholder="esp32_01" placeholder-class="input-placeholder" maxlength="64" disabled="{{saving}}"/>
+    <view class="field-hint">与电脑服务配置的设备编号一致。</view>
+  </view>
+  <view wx:if="{{error}}" class="error-message">{{error}}</view>
+  <button class="save-button" loading="{{saving}}" disabled="{{saving}}" bindtap="saveSettings">{{saving?'正在连接…':'保存并连接'}}</button>
+</view>

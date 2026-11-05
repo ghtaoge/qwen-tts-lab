@@ -1,4 +1,4 @@
-"""Integration checks: generated audio must reach device before synthesis finishes."""
+"""Explicit streaming remains available for diagnostic latency measurements."""
 import threading
 import time
 
@@ -21,12 +21,15 @@ def test_first_part_is_deliverable_before_final_wav_and_lease_survives_completio
     lab.engine.generate_stream = generate_stream
     device_id = lab.CONFIG['device_id']
     headers = {'X-Device-Token':lab.CONFIG['device_token']}
-    job = client.post('/api/jobs', json={'text':'测试语音。', 'device_id':device_id, 'use_cache':False}).json()
+    job = client.post('/api/jobs', json={'text':'测试语音。', 'device_id':device_id, 'use_cache':False,
+                                        'playback_mode':'stream'}).json()
     try:
         assert published.wait(2)
         current = client.get('/api/jobs/'+job['id']).json()
         assert current['status'] == 'synthesizing'
         assert current['audio_url'] is None
+        assert current['first_audio_seconds'] == current['first_generated_part_seconds'] is not None
+        assert not current['playback_ready'] and current['playback_ready_seconds'] is None
         task = client.get(f'/api/device/{device_id}/next',headers=headers).json()['task']
         assert task['id'] == job['id'] and task['protocol'] == 2
         manifest_url = task['manifest_url'] + '?lease=' + task['lease']

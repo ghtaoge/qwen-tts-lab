@@ -312,45 +312,67 @@ bool heartbeat(const char* state, const char* error = "") {
 
 bool cancelled(uint32_t generation) { return cancelPlayback.load() || generation != epoch.load(); }
 
-bool readExact(WiFiClient& stream, uint8_t* target, size_t length, uint32_t generation) {
+struct AudioReadTrace {
+  bool retryable = false;
+  const char* reason = "invalid WAV";
+  size_t expected = 0, received = 0;
+  uint8_t prefix[12] = {};
+};
+
+bool readExact(WiFiClient& stream, uint8_t* target, size_t length, uint32_t generation, AudioReadTrace* trace = nullptr) {
   size_t offset = 0; uint32_t lastData = millis();
   while (offset < length && !cancelled(generation)) {
     const int available = stream.available();
     if (available > 0) {
       const int count = stream.read(target + offset, min(length - offset, static_cast<size_t>(available)));
-      if (count > 0) { offset += count; lastData = millis(); }
-    } else if (!stream.connected() || millis() - lastData > 8000) return false;
-    else vTaskDelay(pdMS_TO_TICKS(1));
+      if (count > 0) { offset += count; lastData = millis(); continue; }
+    }
+    const bool connected = stream.connected();
+    if (!connected || millis() - lastData > 8000) {
+      if (trace) {
+        trace->retryable = true;
+        trace->reason = connected ? "read timeout" : "stream disconnected";
+        trace->expected = length; trace->received = offset;
+      }
+      return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
   return offset == length;
 }
 uint16_t le16(const uint8_t* p) { return p[0] | (uint16_t(p[1]) << 8); }
 uint32_t le32(const uint8_t* p) { return p[0] | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24); }
-bool skipBytes(WiFiClient& stream, uint32_t size, uint32_t generation) {
+bool skipBytes(WiFiClient& stream, uint32_t size, uint32_t generation, AudioReadTrace* trace) {
   uint8_t discard[256];
-  while (size) { const size_t count = min(size, uint32_t(sizeof(discard))); if (!readExact(stream, discard, count, generation)) return false; size -= count; }
+  while (size) { const size_t count = min(size, uint32_t(sizeof(discard))); if (!readExact(stream, discard, count, generation, trace)) return false; size -= count; }
   return true;
 }
 
-bool wavHeader(WiFiClient& stream, uint32_t& rate, uint32_t& bytes, uint32_t generation) {
-  uint8_t header[16];
-  if (!readExact(stream, header, 12, generation) || memcmp(header, "RIFF", 4) || memcmp(header + 8, "WAVE", 4)) return false;
+bool wavHeader(WiFiClient& stream, uint32_t& rate, uint32_t& bytes, uint32_t generation, AudioReadTrace& trace) {
+  uint8_t header[16] = {};
+  const bool prefixRead = readExact(stream, header, 12, generation, &trace);
+  memcpy(trace.prefix, header, sizeof(trace.prefix));
+  if (!prefixRead) return false;
+  if (memcmp(header, "RIFF", 4) || memcmp(header + 8, "WAVE", 4)) {
+    trace.reason = "invalid RIFF header";
+    return false;
+  }
   bool formatSeen = false;
   for (int chunks = 0; chunks < 30; ++chunks) {
-    if (!readExact(stream, header, 8, generation)) return false;
+    if (!readExact(stream, header, 8, generation, &trace)) return false;
     const uint32_t size = le32(header + 4);
     if (!memcmp(header, "fmt ", 4)) {
-      if (size < 16 || size > 4096 || !readExact(stream, header, 16, generation)) return false;
+      if (size < 16 || size > 4096 || !readExact(stream, header, 16, generation, &trace)) return false;
       rate = le32(header + 4);
       if (le16(header) != 1 || le16(header + 2) != 1 || le16(header + 14) != 16 || le16(header + 12) != 2 || rate < 8000 || rate > 48000) return false;
       formatSeen = true;
-      if (!skipBytes(stream, size - 16 + (size & 1), generation)) return false;
+      if (!skipBytes(stream, size - 16 + (size & 1), generation, &trace)) return false;
     } else if (!memcmp(header, "data", 4)) {
       // Buffer one bounded segment, never the entire long utterance.
       if (!formatSeen || size == 0 || size > 4 * 1024 * 1024 || (size & 1)) return false;
       bytes = size; return true;
     } else {
-      if (size > 65536 || !skipBytes(stream, size + (size & 1), generation)) return false;
+      if (size > 65536 || !skipBytes(stream, size + (size & 1), generation, &trace)) return false;
     }
   }
   return false;
@@ -370,38 +392,89 @@ void failPipeline(uint32_t generation, const char* message) {
 void downloadTask(void*) {
   DownloadPart request;
   WiFiClient client; HTTPClient http;
-  http.setReuse(true); http.setTimeout(8000); http.setConnectTimeout(3000);
+  // Audio segments are immutable. Use a fresh connection per attempt rather
+  // than retaining a possibly closed/NAT-expired socket between segments.
+  http.setReuse(false); http.setTimeout(8000); http.setConnectTimeout(3000);
   for (;;) {
     if (xQueueReceive(downloadQueue, &request, portMAX_DELAY) != pdTRUE) continue;
     if (cancelled(request.epoch)) continue;
     AudioPart part{}; part.epoch = request.epoch; part.index = request.index; part.end = request.end;
     if (!request.end) {
       const uint32_t downloadStarted = millis();
-      bool ok = http.begin(client, baseUrl() + request.path);
-      if (ok) { http.addHeader("X-Device-Token", DEVICE_TOKEN); ok = http.GET() == 200; }
+      const char* failureStage = "HTTP begin";
+      int httpStatus = 0;
       uint32_t bytes = 0;
-      if (ok) ok = wavHeader(*http.getStreamPtr(), part.rate, bytes, request.epoch);
-      if (ok) {
-        // Backpressure keeps prefetched PCM bounded. N16R8 uses its PSRAM here.
-        const size_t budget = 2 * 1024 * 1024;
-        while (!cancelled(request.epoch) && bufferedBytes.load() > (bytes > budget ? 0 : budget - bytes)) vTaskDelay(pdMS_TO_TICKS(5));
-        if (!cancelled(request.epoch)) {
-          part.size = bytes;
-          part.data = static_cast<uint8_t*>(heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-          if (!part.data && bytes <= 65536) part.data = static_cast<uint8_t*>(malloc(bytes));
-          if (part.data) { bufferedBytes.fetch_add(bytes); ok = readExact(*http.getStreamPtr(), part.data, bytes, request.epoch); }
-          else ok = false;
-        } else ok = false;
+      bool ok = false;
+      unsigned attempt = 0;
+      AudioReadTrace trace;
+      for (attempt = 1; attempt <= 3 && !cancelled(request.epoch); ++attempt) {
+        trace = AudioReadTrace{};
+        trace.reason = "HTTP begin failed";
+        failureStage = "HTTP begin"; httpStatus = 0; bytes = 0;
+        part.rate = 0; part.size = 0;
+        client.stop();
+        ok = http.begin(client, baseUrl() + request.path);
+        if (ok) {
+          failureStage = "HTTP response";
+          trace.reason = "HTTP response failed";
+          http.addHeader("X-Device-Token", DEVICE_TOKEN);
+          httpStatus = http.GET(); ok = httpStatus == 200;
+          trace.retryable = httpStatus < 0 || httpStatus == 408 || httpStatus == 429 || httpStatus >= 500;
+        }
+        WiFiClient* stream = nullptr;
+        if (ok) {
+          failureStage = "WAV header";
+          trace = AudioReadTrace{};
+          stream = http.getStreamPtr();
+          if (stream) ok = wavHeader(*stream, part.rate, bytes, request.epoch, trace);
+          else { ok = false; trace.retryable = true; trace.reason = "missing HTTP stream"; }
+        }
+        if (ok) {
+          // Keep only a complete bounded segment. Failed attempts are freed
+          // before retry, and no partial PCM is ever sent to playback.
+          const size_t budget = 2 * 1024 * 1024;
+          while (!cancelled(request.epoch) && bufferedBytes.load() > (bytes > budget ? 0 : budget - bytes)) vTaskDelay(pdMS_TO_TICKS(5));
+          if (!cancelled(request.epoch)) {
+            failureStage = "PCM allocation";
+            trace.reason = "PCM allocation failed"; trace.retryable = false;
+            part.size = bytes;
+            part.data = static_cast<uint8_t*>(heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            if (!part.data && bytes <= 65536) part.data = static_cast<uint8_t*>(malloc(bytes));
+            if (part.data) {
+              failureStage = "PCM body";
+              bufferedBytes.fetch_add(bytes);
+              ok = readExact(*stream, part.data, bytes, request.epoch, &trace);
+            } else ok = false;
+          } else ok = false;
+        }
+        http.end();
+        client.stop();
+        if (ok) break;
+        releasePart(part);
+        if (cancelled(request.epoch) || !trace.retryable || attempt == 3) break;
+        const uint32_t retryAt = millis();
+        while (!cancelled(request.epoch) && millis() - retryAt < attempt * 150) {
+          vTaskDelay(pdMS_TO_TICKS(10));
+        }
       }
       const uint32_t downloadElapsed = millis() - downloadStarted;
-      // A cancellation can stop inside the HTTP body. Close that socket rather
-      // than letting its remaining PCM corrupt the next task's HTTP response.
-      if (!ok) http.setReuse(false);
-      http.end();
-      http.setReuse(true);
       if (!ok) {
         releasePart(part);
-        if (!cancelled(request.epoch)) failPipeline(request.epoch, "音频片段下载、WAV 格式或内存分配失败");
+        if (!cancelled(request.epoch)) {
+          const char* detail = "音频文件格式不支持，请重新生成音频";
+          if (httpStatus == 401 || httpStatus == 403) detail = "设备认证失败，请检查设备令牌";
+          else if (httpStatus == 404) detail = "音频文件不存在，请重新生成音频";
+          else if (!strcmp(failureStage, "PCM allocation")) detail = "音频缓冲分配失败，请检查PSRAM";
+          else if (trace.retryable) detail = "音频下载中断或超时，重试仍失败，请检查网络";
+          else if (httpStatus != 200) detail = "音频请求失败，请检查电脑服务和网络";
+          Serial.printf("[AUDIO] part=%lu attempts=%u stage=%s reason=%s HTTP=%d PCM=%lu read=%lu/%lu free_heap=%lu free_psram=%lu RSSI=%d IP=%s header=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n",
+            static_cast<unsigned long>(request.index), attempt, failureStage, trace.reason, httpStatus,
+            static_cast<unsigned long>(bytes), static_cast<unsigned long>(trace.received), static_cast<unsigned long>(trace.expected),
+            static_cast<unsigned long>(ESP.getFreeHeap()), static_cast<unsigned long>(ESP.getFreePsram()), WiFi.RSSI(), WiFi.localIP().toString().c_str(),
+            trace.prefix[0], trace.prefix[1], trace.prefix[2], trace.prefix[3], trace.prefix[4], trace.prefix[5],
+            trace.prefix[6], trace.prefix[7], trace.prefix[8], trace.prefix[9], trace.prefix[10], trace.prefix[11]);
+          failPipeline(request.epoch, detail);
+        }
         continue;
       }
       if (request.index == 1) {

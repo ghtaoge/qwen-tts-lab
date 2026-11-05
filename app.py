@@ -70,6 +70,7 @@ class SynthesisRequest(BaseModel):
     device_id: str | None = None
     use_cache: bool = True
     display_mode: Literal['buddy', 'wave', 'text'] = 'buddy'
+    playback_mode: Literal['complete', 'stream'] = 'complete'
 
     @field_validator('text')
     @classmethod
@@ -108,6 +109,18 @@ class Heartbeat(BaseModel):
     error: str = Field(default='', max_length=300)
 
 
+class ReplayRequest(BaseModel):
+    device_id: str
+    display_mode: Literal['buddy', 'wave', 'text'] | None = None
+
+    @field_validator('device_id')
+    @classmethod
+    def valid_device(cls, value):
+        if value != CONFIG['device_id']:
+            raise ValueError('未知设备编号')
+        return value
+
+
 class VolumeRequest(BaseModel):
     volume: int = Field(ge=0, le=100)
 
@@ -119,10 +132,31 @@ def save_job(job):
     temp.replace(path)
 
 
+def trim_history():
+    # Keep all active generation and undelivered device work in memory.
+    for old_id, old in list(jobs.items()):
+        if len(jobs) <= 100:
+            break
+        if old['status'] in TERMINAL and old.get('delivery') not in {
+                'pending', 'leased', 'waiting', 'buffering', 'playing'}:
+            jobs.pop(old_id)
+
+
 def public_job(job):
     value = copy.deepcopy(job)
     value.pop('lease', None)
     value.pop('lease_until', None)
+    value.setdefault('playback_mode', 'complete')
+    value['playback_ready'] = bool(job.get('status') == 'completed' and job.get('audio_url'))
+    value['playback_ready_seconds'] = job.get('total_seconds') if value['playback_ready'] else None
+    value['first_generated_part_seconds'] = job.get('first_audio_seconds')
+    if value['playback_mode'] == 'complete':
+        value['first_audio_seconds'] = value['playback_ready_seconds']
+        if not value['playback_ready']:
+            # Native CPU inference can be slower than playback. Internal fragments
+            # are not playable output until the final WAV has been closed.
+            value['parts'] = []
+            value['audio_url'] = None
     value['revision'] = job_revision(job)
     return value
 
@@ -514,7 +548,7 @@ def submit(body: SynthesisRequest):
         cache_key = hashlib.sha256(json.dumps(settings, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:24]
         job_id = uuid.uuid4().hex
         job = dict(id=job_id, text=body.text, voice=body.voice, language=body.language, speed=body.speed,
-                   display_mode=body.display_mode,
+                   display_mode=body.display_mode, playback_mode=body.playback_mode,
                    device_id=body.device_id, status='queued', stage='等待推理', created_at=time.time(),
                    parts=[], total_parts=None, first_audio_seconds=None, audio_url=None, duration=None,
                    sample_rate=None, inference_seconds=None, processing_seconds=None, total_seconds=None,
@@ -543,12 +577,63 @@ def submit(body: SynthesisRequest):
             event = threading.Event()
             cancel_events[job_id] = event
             executor.submit(run_job, job_id, event)
-        # Cap in-memory history; keep all active and undelivered device work.
-        for old_id, old in list(jobs.items()):
-            if len(jobs) <= 100:
-                break
-            if old['status'] in TERMINAL and old.get('delivery') not in {'pending', 'leased', 'waiting', 'buffering', 'playing'}:
-                jobs.pop(old_id)
+        trim_history()
+        return public_job(job)
+
+
+@app.post('/api/jobs/{source_id}/replay', status_code=202)
+def replay_job(source_id: str, body: ReplayRequest):
+    """Queue another device playback of existing audio without invoking inference."""
+    with lock:
+        source = jobs.get(source_id)
+        if source is None:
+            raise HTTPException(404, '生成记录不存在')
+        if source.get('status') != 'completed' or not source.get('audio_url'):
+            raise HTTPException(409, '语音尚未生成完成，暂时不能重播')
+
+        parts = copy.deepcopy(source.get('parts') or [])
+        if not parts:
+            # Old completed records can predate incremental audio publication.
+            parts = [{'index': 1, 'text': source.get('text', ''),
+                      'audio_url': source['audio_url'], 'duration': source.get('duration')}]
+        if (not isinstance(parts, list) or any(
+                not isinstance(part, dict) or part.get('index') != index
+                for index, part in enumerate(parts, 1))):
+            raise HTTPException(409, '音频片段信息不完整，请重新生成')
+
+        # References come from saved history, so validate their route and ensure
+        # each file remains inside outputs even if a local file is a symlink.
+        audio_urls = [source['audio_url']] + [part.get('audio_url') for part in parts]
+        for audio_url in audio_urls:
+            if not isinstance(audio_url, str) or not re.fullmatch(
+                    r'/api/audio/[a-f0-9]{32}(?:_p[1-9][0-9]*)?\.wav', audio_url):
+                raise HTTPException(404, '音频文件不可用，请重新生成')
+            path = (OUTPUT / audio_url.rsplit('/', 1)[-1]).resolve()
+            if (not path.is_relative_to(OUTPUT.resolve()) or not path.is_file()
+                    or path.stat().st_size == 0):
+                raise HTTPException(404, '音频文件已不存在，请重新生成')
+
+        pending = sum(job.get('device_id') == body.device_id and job.get('delivery') in {
+            'pending', 'leased', 'waiting', 'buffering', 'playing'} for job in jobs.values())
+        if pending >= 4:
+            raise HTTPException(429, '开发板播放队列已满，请等待播放完成或停止旧任务')
+
+        job_id = uuid.uuid4().hex
+        job = {key: copy.deepcopy(source[key]) for key in (
+            'text', 'voice', 'language', 'speed', 'audio_url', 'duration', 'sample_rate',
+            'cache_key', 'engine_backend', 'engine_device', 'precision') if key in source}
+        job.update(id=job_id, replay_of=source.get('replay_of') or source_id, playback_mode='complete',
+                   device_id=body.device_id, display_mode=body.display_mode or source.get('display_mode', 'buddy'),
+                   status='completed', stage='重播已生成音频', created_at=time.time(),
+                   parts=parts, total_parts=len(parts), cache_hit=True, reused_audio=True,
+                   first_audio_seconds=0, inference_seconds=0, processing_seconds=0,
+                   worker_seconds=0, total_seconds=0, queued_seconds=0, rtf=0,
+                   peak_vram_mb=None, error=None, device_first_audio_seconds=None,
+                   delivery='pending')
+        save_job(job)
+        jobs[job_id] = job
+        trim_history()
+        updates.notify(job_id)
         return public_job(job)
 
 
@@ -570,7 +655,10 @@ async def get_job(job_id: str, after_parts: int = Query(default=0, ge=0),
             job = jobs[job_id]
             finished = job['status'] in TERMINAL and job.get('delivery') not in {
                 'pending', 'leased', 'waiting', 'buffering', 'playing'}
-            if (not revision or revision != job_revision(job) or len(job.get('parts', ())) > after_parts
+            visible_parts = len(job.get('parts', ())) if (
+                job.get('playback_mode', 'complete') == 'stream'
+                or job.get('status') == 'completed' and job.get('audio_url')) else 0
+            if (not revision or revision != job_revision(job) or visible_parts > after_parts
                     or finished or time.monotonic() >= deadline):
                 return public_job(job)
             # Register under the same lock as publication: a packet cannot be
@@ -609,6 +697,12 @@ def audio_file(filename: str):
     path = OUTPUT / filename
     if not path.is_file():
         raise HTTPException(404, '音频不存在')
+    owner_id = filename[:32]
+    with lock:
+        owner = jobs.get(owner_id)
+        if (owner and owner.get('playback_mode', 'complete') == 'complete'
+                and (owner.get('status') != 'completed' or not owner.get('audio_url'))):
+            raise HTTPException(409, '语音尚未转换完成，完成后才能播放')
     return FileResponse(path, media_type='audio/wav', filename=filename)
 
 

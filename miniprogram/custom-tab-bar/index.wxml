@@ -1,0 +1,3 @@
+<view class="large-tab-bar">
+  <button wx:for="{{items}}" wx:key="path" class="large-tab-item {{selected===index?'selected':''}}" data-index="{{index}}" bindtap="selectTab">{{item.text}}</button>
+</view>

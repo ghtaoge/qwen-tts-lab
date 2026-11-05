@@ -56,7 +56,8 @@ def blocked_job(client):
         gate.wait(3)
         return original(*args)
     lab.engine.generate = generate
-    job = client.post('/api/jobs', json={'text':'通知测试。', 'use_cache':False}).json()
+    job = client.post('/api/jobs', json={'text':'通知测试。', 'use_cache':False,
+                                        'playback_mode':'stream'}).json()
     assert generating.wait(2)
     return gate, client.get('/api/jobs/' + job['id']).json()
 
