@@ -7,6 +7,8 @@
     <view class="slider-label"><text>朗读语速</text><text>{{speedLabel}}</text></view><slider min="75" max="150" step="5" value="{{speed*100}}" activeColor="#7c68d8" block-size="18" bindchange="changeSpeed"/><view class="range-label"><text>舒缓 0.75×</text><text>轻快 1.50×</text></view>
     <view class="switch-row"><view>发送到开发板<text class="small {{deviceOnline?'green':''}}">{{deviceId}} · {{deviceOnline?(deviceSimulated?'模拟接收器在线':'在线'):'离线，任务将等待领取'}}</text></view><switch checked="{{sendDevice}}" color="#7c68d8" bindchange="toggleDevice"/></view><view class="switch-row"><text>复用相同内容缓存</text><switch checked="{{useCache}}" color="#7c68d8" bindchange="toggleCache"/></view>
     <view class="switch-row"><view>首包就绪即连续试听<text class="small">提前下载下一段，不等待完整音频</text></view><switch checked="{{autoPlayParts}}" color="#7c68d8" bindchange="toggleAutoPlay"/></view>
+    <view class="section-title screen-title"><text>屏幕玩法</text><text class="muted">随下一次文字发送</text></view><view class="screen-modes"><button wx:for="{{displayModes}}" wx:key="id" class="screen-mode {{displayMode===item.id?'active':''}}" data-id="{{item.id}}" bindtap="selectDisplayMode"><text>{{item.name}}</text><text class="screen-mode-hint">{{item.hint}}</text></button></view>
+    <view class="screen-line"><text class="screen-face">{{displayMode==='wave'?'▂▆▃':displayMode==='text'?'文':'•ᴗ•'}}</text><text>{{screenHint}}</text></view>
     <button class="primary" bindtap="generate">{{busy?'■ 停止生成':'✦ 生成语音'}}</button>
     <view class="error" wx:if="{{error}}">{{error}}</view>
   </view>

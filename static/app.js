@@ -191,7 +191,7 @@ async function submit() {
   const wantsAuto=$('autoPlay').checked;
   if(wantsAuto){autoActive=true;streamPlayer.start();}
   try {
-    const job=await api('/api/jobs',{method:'POST',body:JSON.stringify({text,voice:selectedVoice,language:$('language').value,speed:Number($('speed').value),use_cache:$('useCache').checked,device_id:$('sendDevice').checked?($('sendDevice').dataset.device||'esp32_01'):null})});
+    const job=await api('/api/jobs',{method:'POST',body:JSON.stringify({text,voice:selectedVoice,language:$('language').value,speed:Number($('speed').value),use_cache:$('useCache').checked,display_mode:displayMode(),device_id:$('sendDevice').checked?($('sendDevice').dataset.device||'esp32_01'):null})});
     $('player').pause();$('player').removeAttribute('src');$('player').load();currentAudioUrl='';drawWave(null);
     $('download').removeAttribute('href');$('download').classList.add('disabled');$('download').setAttribute('aria-disabled','true');
     timerHandle=setInterval(()=>$('timer').textContent=secs((performance.now()-jobStarted)/1000),100);
@@ -212,7 +212,7 @@ async function refreshHistory() {
       row.onclick=()=>{
         if(currentJob&&!['completed','failed','cancelled'].includes(currentJob.status)&&currentJob.id!==job.id){toast('请先等待或停止当前任务。');return;}
         const selected=currentJob?.id===job.id?currentJob:job;
-        clearTimeout(pollHandle);clearInterval(timerHandle);stopAuto();browserFirstSeconds=null;manualAudioSelection=false;pollFailures=0;jobStarted=0;$('text').value=selected.text;updateCount();chooseVoice(selected.voice);$('speed').value=selected.speed;updateSpeed();$('language').value=selected.language;renderJob(selected);
+        clearTimeout(pollHandle);clearInterval(timerHandle);stopAuto();browserFirstSeconds=null;manualAudioSelection=false;pollFailures=0;jobStarted=0;$('text').value=selected.text;updateCount();chooseVoice(selected.voice);$('speed').value=selected.speed;updateSpeed();$('language').value=selected.language;$('displayMode').value=selected.display_mode||'buddy';updateDisplayMode();renderJob(selected);
         if(selected.audio_url)setAudio(selected.audio_url,true);pollJob(selected.id);window.scrollTo({top:0,behavior:'smooth'});
       };target.append(row);
     });
@@ -220,6 +220,9 @@ async function refreshHistory() {
 }
 function updateCount(){$('charCount').textContent=$('text').value.length;}
 function updateSpeed(){$('speedValue').textContent=Number($('speed').value).toFixed(2)+'×';}
+function displayMode(){const value=$('displayMode').value;return ['buddy','wave','text'].includes(value)?value:'buddy';}
+function updateDisplayMode(){$('oledPreviewLink').href='/oled-preview.html?mode='+displayMode();}
+$('displayMode').addEventListener('change',updateDisplayMode);
 $('text').addEventListener('input',updateCount);$('speed').addEventListener('input',updateSpeed);
 $('volume').addEventListener('input',()=>{$('volumeValue').textContent=$('volume').value+'%';$('player').volume=Number($('volume').value)/100;streamPlayer.setVolume(Number($('volume').value)/100);});$('player').volume=.8;
 $('moreVoice').addEventListener('change',()=>{if($('moreVoice').value)chooseVoice($('moreVoice').value);});

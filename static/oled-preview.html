@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>屏幕小剧场 · OLED 玩法预览</title>
+  <link rel="stylesheet" href="oled-preview.css">
+  <script src="oled-preview.js" defer></script>
+</head>
+<body>
+  <main class="preview-shell">
+    <header><a class="back-link" href="index.html">← 语音实验室</a><span class="simulation-badge">动画模拟 · 不连接设备</span></header>
+    <section class="intro"><div class="eyebrow">A LITTLE SCREEN, A LITTLE COMPANY</div><h1>让小屏幕，也有点小表情。</h1><p>文字在旁边，小搭子在眼前。挑一种玩法，看看它如何陪你说完一句话。</p></section>
+    <div class="preview-grid">
+      <section class="screen-panel" aria-label="128乘64单色OLED设计预览">
+        <div class="panel-heading"><span id="modeName">声波伙伴</span><span>128 × 64 / MONO</span></div>
+        <div class="oled-board"><i class="screw top-left" aria-hidden="true"></i><i class="screw top-right" aria-hidden="true"></i><i class="screw bottom-left" aria-hidden="true"></i><i class="screw bottom-right" aria-hidden="true"></i><div class="bezel"><canvas id="oledScreen" width="128" height="64" role="img" aria-label="小搭子与中文分页的单色动画模拟">OLED设计预览；请使用下方文字状态和右侧控制。</canvas></div><div class="board-label" aria-hidden="true">OLED / 12864<span>SDA 8 · SCL 9</span></div></div>
+        <div class="screen-caption"><span class="status-dot" aria-hidden="true"></span><span id="stageDescription" role="status">待机 · 安静陪伴</span><button id="nextPage" type="button">下一页 <span id="pageLabel">1 / 1</span> →</button></div>
+        <div class="simulation-level"><span>模拟振幅</span><meter id="amplitudeMeter" min="0" max="1" value="0" aria-label="模拟振幅，非实际音频"></meter><output id="amplitudeValue">0%</output></div>
+        <p class="screen-note">这是动画与分页的设计模拟，不合成、不播放语音，也不测量设备性能。角色嘴形和柱子使用模拟振幅；实物使用收到的 PCM 音量，不做逐字口型同步。</p>
+      </section>
+      <section class="control-panel" aria-label="OLED模拟控制">
+        <fieldset class="mode-picker"><legend>01 <span>选一个屏幕伙伴</span></legend><label class="mode-card"><input type="radio" name="mode" value="buddy" checked><span class="mode-icon" aria-hidden="true">▣</span><span><strong>声波伙伴</strong><small>小搭子等候眨眼，跟着音量动嘴。</small></span><span class="selection-mark" aria-hidden="true">✓</span></label><label class="mode-card"><input type="radio" name="mode" value="wave"><span class="mode-icon wave-icon" aria-hidden="true">▂▆▃</span><span><strong>声波电台</strong><small>把声音变成一排跳动的小柱子。</small></span><span class="selection-mark" aria-hidden="true">✓</span></label><label class="mode-card"><input type="radio" name="mode" value="text"><span class="mode-icon" aria-hidden="true">文</span><span><strong>专注文字</strong><small>让出整个屏幕，中文一页页读。</small></span><span class="selection-mark" aria-hidden="true">✓</span></label></fieldset>
+        <div class="control-heading">02 <span>试试不同阶段</span></div>
+        <label class="field-label" for="stage">演示阶段<select id="stage"><option value="idle">待机 idle</option><option value="queued">排队 queued</option><option value="thinking">生成中 thinking</option><option value="buffering">缓冲 buffering</option><option value="playing">播放 playing</option><option value="finished">完成 finished</option><option value="stopped">停止 stopped</option><option value="error">出错 error</option></select></label>
+        <label class="volume-label" for="volume">模拟音量 <output id="volumeValue">70%</output><input id="volume" type="range" min="0" max="100" step="1" value="70"><span>在“播放”阶段观察嘴形或柱子。音量为 0 时保持安静。</span></label>
+        <label class="field-label" for="previewText">屏幕文字<textarea id="previewText" maxlength="300" rows="3">你好，欢迎来到语音实验室。今天也要保持好心情，去发现生活里的小美好。</textarea></label>
+        <p class="layout-note" id="layoutNote">左侧小搭子，右侧中文 3 行；首次进入播放回到第一页，再每 3 秒轮播。</p>
+        <div class="button-row"><button id="demo" class="primary" type="button" aria-pressed="false">▶ 演示一次完整流程</button><button id="pause" type="button" aria-pressed="false">暂停动画</button></div>
+        <p class="motion-note" id="motionNote" role="status">动画上限 8 帧/秒；切到其他标签页自动暂停。</p>
+      </section>
+    </div>
+    <footer><span>小画面，不改变声音。</span><span>1-bit模拟 · 字体与缺字显示以实际 OLED 字库为准</span></footer>
+  </main>
+</body>
+</html>

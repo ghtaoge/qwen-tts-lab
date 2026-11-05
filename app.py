@@ -17,6 +17,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -68,6 +69,7 @@ class SynthesisRequest(BaseModel):
     speed: float = Field(default=1.0, ge=0.75, le=1.5)
     device_id: str | None = None
     use_cache: bool = True
+    display_mode: Literal['buddy', 'wave', 'text'] = 'buddy'
 
     @field_validator('text')
     @classmethod
@@ -452,7 +454,7 @@ async def lifespan(application):
     yield
 
 
-app = FastAPI(title='Qwen TTS Lab', version='1.2.0', lifespan=lifespan)
+app = FastAPI(title='Qwen TTS Lab', version='1.3.0', lifespan=lifespan)
 
 
 @app.middleware('http')
@@ -512,6 +514,7 @@ def submit(body: SynthesisRequest):
         cache_key = hashlib.sha256(json.dumps(settings, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:24]
         job_id = uuid.uuid4().hex
         job = dict(id=job_id, text=body.text, voice=body.voice, language=body.language, speed=body.speed,
+                   display_mode=body.display_mode,
                    device_id=body.device_id, status='queued', stage='等待推理', created_at=time.time(),
                    parts=[], total_parts=None, first_audio_seconds=None, audio_url=None, duration=None,
                    sample_rate=None, inference_seconds=None, processing_seconds=None, total_seconds=None,

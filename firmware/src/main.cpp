@@ -7,6 +7,7 @@
 #include <atomic>
 #include "esp_heap_caps.h"
 #include "driver/i2s_std.h"
+#include "oled_scene.h"
 #if __has_include("secrets.h")
 #include "secrets.h"
 #else
@@ -20,6 +21,10 @@ U8G2* oled = OLED_IS_SH1106 ? static_cast<U8G2*>(&sh) : static_cast<U8G2*>(&ssd)
 i2s_chan_handle_t amplifier = nullptr;
 constexpr uint32_t DMA_DESCRIPTORS = 8, DMA_FRAMES = 256;
 QueueHandle_t downloadQueue, audioQueue, resultQueue, displayQueue;
+TaskHandle_t displayWorker = nullptr;
+std::atomic<uint8_t> audioLevel{0};
+std::atomic<uint32_t> audioLevelAt{0};
+std::atomic<OledScene::Phase> scenePhase{OledScene::Phase::Idle};
 std::atomic<bool> cancelPlayback{false}, audioBusy{false};
 std::atomic<int> volume{70};
 std::atomic<uint32_t> epoch{0}, firstSampleAt{0}, playedParts{0};
@@ -39,10 +44,38 @@ struct PlayJob { char id[40], lease[40], manifest[160], text[1300]; };
 struct DownloadPart { uint32_t epoch, index; bool end; char path[128]; };
 struct AudioPart { uint32_t epoch, index, rate; uint8_t* data; size_t size; bool end; };
 struct PlayResult { bool ok; bool cancelled; char error[120]; };
-struct DisplayState { char text[1300]; char heading[40]; };
+struct DisplayState { char text[1300]; char heading[40]; OledScene::Theme theme = OledScene::Theme::Buddy; };
 PlayJob active{};
 DisplayState requestedDisplay{}; // Only the Arduino loop writes this snapshot.
 String lastFinishedId;
+OledScene::Theme displayTheme = OledScene::Theme::Buddy;
+OledScene::Phase displayPhase = OledScene::Phase::Idle;
+uint32_t phaseSince = 0;
+uint8_t previousFrame[1024] = {};
+bool previousFrameValid = false;
+std::atomic<uint32_t> oledFrameCount{0}, oledPayloadBytes{0}, oledMaxFlushUs{0};
+uint32_t jobOledFrames = 0, jobOledBytes = 0;
+
+void wakeDisplay() { if (displayWorker) xTaskNotifyGive(displayWorker); }
+void setScenePhase(OledScene::Phase phase) { if (scenePhase.exchange(phase) != phase) wakeDisplay(); }
+
+const char* phaseTitle(OledScene::Phase phase) {
+  switch (phase) {
+    case OledScene::Phase::Queued: return "IN QUEUE";
+    case OledScene::Phase::Thinking: return "THINKING";
+    case OledScene::Phase::Buffering: return "BUFFERING";
+    case OledScene::Phase::Playing: return volume.load() ? "SPEAKING" : "MUTED";
+    case OledScene::Phase::Finished: return "ALL DONE";
+    case OledScene::Phase::Stopped: return "STOPPED";
+    case OledScene::Phase::Error: return "OOPS";
+    default: return "READY";
+  }
+}
+
+OledScene::Theme parseTheme(const char* mode) {
+  return !strcmp(mode, "wave") ? OledScene::Theme::Wave :
+         !strcmp(mode, "text") ? OledScene::Theme::Text : OledScene::Theme::Buddy;
+}
 
 String baseUrl() { return String("http://") + SERVER_HOST + ":" + SERVER_PORT; }
 String devicePath(const char* action) { return String("/api/device/") + DEVICE_ID + "/" + action; }
@@ -62,41 +95,96 @@ bool decodeUtf8(const char* text, size_t size, size_t& index, uint32_t& cp) {
 }
 
 size_t layout(size_t start, bool draw) {
+  const auto box = OledScene::textBox(displayTheme);
   const size_t size = strlen(displayText);
   size_t index = start;
-  int x = 0, line = 0;
+  int x = box.x, line = 0;
   oled->setFont(u8g2_font_wqy12_t_gb2312);
   while (index < size) {
     const size_t before = index;
     uint32_t cp;
     if (!decodeUtf8(displayText, size, index, cp)) break;
     if (cp == '\r') continue;
-    if (cp == '\n') { x = 0; if (++line == 3) return index; continue; }
+    if (cp == '\n') { x = box.x; if (++line == box.rows) return index; continue; }
     const uint16_t glyph = cp <= 0xFFFF && u8g2_IsGlyph(oled->getU8g2(), cp) ? cp : '?';
     int width = u8g2_GetGlyphWidth(oled->getU8g2(), glyph);
     if (width <= 0) width = 6;
-    if (x + width > 128) { x = 0; if (++line == 3) return before; }
-    if (draw) oled->drawGlyph(x, 29 + 16 * line, glyph);
+    if (x + width > box.x + box.width) { x = box.x; if (++line == box.rows) return before; }
+    if (draw) oled->drawGlyph(x, box.y + 13 + box.line_height * line, glyph);
     x += width;
   }
   return index;
 }
 
+void flushChangedTiles() {
+  const uint32_t started = micros();
+  uint32_t payload = 0;
+  const uint8_t* buffer = oled->getBufferPtr();
+  if (!previousFrameValid) {
+    oled->sendBuffer(); previousFrameValid = true;
+    payload = sizeof(previousFrame);
+  } else {
+    // Full-buffer R0: each 8x8 tile occupies eight bytes. Send only changed
+    // spans, so a speaking mouth does not retransmit the unchanged paragraph.
+    for (uint8_t row = 0; row < 8; ++row) {
+      uint8_t first = 16, last = 0;
+      for (uint8_t col = 0; col < 16; ++col) {
+        const size_t offset = (row * 16 + col) * 8;
+        if (memcmp(buffer + offset, previousFrame + offset, 8)) {
+          first = min(first, col); last = col;
+        }
+      }
+      if (first != 16) {
+        oled->updateDisplayArea(first, row, last - first + 1, 1);
+        payload += (last - first + 1) * 8;
+      }
+    }
+  }
+  memcpy(previousFrame, buffer, sizeof(previousFrame));
+  if (payload) {
+    oledFrameCount.fetch_add(1); oledPayloadBytes.fetch_add(payload);
+    const uint32_t elapsed = micros() - started;
+    uint32_t maximum = oledMaxFlushUs.load();
+    while (elapsed > maximum && !oledMaxFlushUs.compare_exchange_weak(maximum, elapsed)) {}
+  }
+}
+
+OledScene::Phase effectivePhase() {
+  if (audioBusy.load()) {
+    if (pipelineFailed.load()) return OledScene::Phase::Error;
+    if (cancelPlayback.load()) return OledScene::Phase::Stopped;
+    if (firstSampleAt.load()) {
+      // Keep the mouth active through the short DMA tail, then show buffering
+      // only when no PCM has been accepted for longer than the audio ring.
+      return waitingForAudio.load() && millis() - audioLevelAt.load() > 120 ?
+          OledScene::Phase::Buffering : OledScene::Phase::Playing;
+    }
+  }
+  return scenePhase.load();
+}
+
 void render() {
   if (!displayReady) return;
+  const uint32_t now = millis();
+  const auto phase = effectivePhase();
+  if (phase != displayPhase) { displayPhase = phase; phaseSince = now; }
+  uint8_t level = audioLevel.load();
+  if (volume.load() == 0 || now - audioLevelAt.load() > 160 || phase != OledScene::Phase::Playing) level = 0;
   oled->clearBuffer();
   oled->setFont(u8g2_font_5x8_tf);
-  oled->drawStr(0, 8, headerText);
+  oled->drawStr(0, 8, phaseTitle(phase));
   char counter[20]; snprintf(counter, sizeof(counter), "%u/%u", page + 1, pageCount);
   oled->drawStr(128 - oled->getStrWidth(counter), 8, counter);
   oled->drawHLine(0, 12, 128);
+  OledScene::draw(*oled, {displayTheme, phase, level, now, phaseSince});
   layout(pageStart[page], true);
-  oled->sendBuffer();
+  flushChangedTiles();
 }
 
 void applyDisplay(const DisplayState& state) {
   strlcpy(headerText, state.heading, sizeof(headerText));
-  if (!strcmp(displayText, state.text)) { render(); return; }
+  if (!strcmp(displayText, state.text) && displayTheme == state.theme) return;
+  displayTheme = state.theme;
   strlcpy(displayText, state.text, sizeof(displayText));
   pageCount = 1; pageStart[0] = 0; page = 0;
   const size_t size = strlen(displayText);
@@ -107,14 +195,14 @@ void applyDisplay(const DisplayState& state) {
     pageStart[pageCount++] = next;
     cursor = next;
   }
-  pageAt = millis(); render();
+  pageAt = millis();
 }
 
 void queueDisplay() {
   // The full framebuffer takes about 100ms at 100kHz. A separate worker keeps
   // this I2C transfer off the manifest/download path, including the first task.
-  if (displayQueue) xQueueOverwrite(displayQueue, &requestedDisplay);
-  else applyDisplay(requestedDisplay); // Startup, before worker creation.
+  if (displayQueue) { xQueueOverwrite(displayQueue, &requestedDisplay); wakeDisplay(); }
+  else { applyDisplay(requestedDisplay); render(); } // Startup, before worker creation.
 }
 
 void show(const char* text, const char* heading) {
@@ -131,10 +219,21 @@ void showHeading(const char* heading) {
 
 void displayTask(void*) {
   DisplayState state;
+  uint32_t renderedAt = 0;
+  uint32_t speechEpoch = UINT32_MAX;
   for (;;) {
-    if (xQueueReceive(displayQueue, &state, pdMS_TO_TICKS(100)) == pdTRUE) applyDisplay(state);
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+    const bool changed = xQueueReceive(displayQueue, &state, 0) == pdTRUE;
+    if (changed) applyDisplay(state);
+    const uint32_t now = millis();
+    if (audioBusy.load() && firstSampleAt.load() && speechEpoch != epoch.load()) {
+      speechEpoch = epoch.load(); page = 0; pageAt = now;
+    }
     if (pageCount > 1 && millis() - pageAt > 3000) {
-      page = (page + 1) % pageCount; pageAt = millis(); render();
+      page = (page + 1) % pageCount; pageAt = now;
+    }
+    if (changed || effectivePhase() != displayPhase || now - renderedAt >= 125) {
+      renderedAt = now; render(); // No catch-up queue; animation is <=8fps.
     }
   }
 }
@@ -265,6 +364,7 @@ void failPipeline(uint32_t generation, const char* message) {
   if (generation != epoch.load() || cancelPlayback.load()) return;
   strlcpy(pipelineError, message, sizeof(pipelineError));
   pipelineFailed.store(true); cancelPlayback.store(true);
+  audioLevel.store(0); wakeDisplay();
 }
 
 void downloadTask(void*) {
@@ -328,10 +428,12 @@ void playbackTask(void*) {
     if (seenEpoch != generation) {
       if (enabled) { i2s_channel_disable(amplifier); rebuildAudio = true; }
       enabled = false; rate = 0; seenEpoch = generation;
+      audioLevel.store(0);
     }
     if (audioBusy.load() && cancelPlayback.load() && finishedEpoch != generation) {
       if (enabled) i2s_channel_disable(amplifier);
       enabled = false; rebuildAudio = true;
+      audioLevel.store(0); wakeDisplay();
       PlayResult result{}; result.cancelled = !pipelineFailed.load();
       if (pipelineFailed.load()) strlcpy(result.error, pipelineError, sizeof(result.error));
       xQueueSend(resultQueue, &result, portMAX_DELAY); finishedEpoch = generation;
@@ -385,10 +487,16 @@ void playbackTask(void*) {
     while (cursor < part.size && !cancelled(generation)) {
       const size_t monoBytes = min(part.size - cursor, size_t(2048));
       const int level = volume.load();
+      uint32_t magnitude = 0;
       for (size_t i = 0; i < monoBytes / 2; ++i) {
         const int16_t sample = static_cast<int16_t>(le16(part.data + cursor + i * 2));
         stereo[i * 2] = stereo[i * 2 + 1] = static_cast<int32_t>(sample) * level / 100;
+        const int32_t scaled = stereo[i * 2];
+        magnitude += scaled < 0 ? -scaled : scaled;
       }
+      // The already-scaled PCM drives visuals: one integer accumulation in the
+      // existing conversion loop, no FFT, audio copy, heap allocation or socket.
+      const uint8_t blockLevel = min(uint32_t(255), (magnitude / (monoBytes / 2)) * 255 / 4096);
       const size_t total = monoBytes * 2; size_t offset = 0;
       if (!enabled) {
         // Put valid samples into DMA before starting its clock. Enabling an
@@ -407,7 +515,9 @@ void playbackTask(void*) {
         if (cancelled(generation)) { rebuildAudio = true; break; }
         if (i2s_channel_enable(amplifier) != ESP_OK) { failPipeline(generation, "I2S 启动失败"); break; }
         enabled = true;
+        audioLevel.store(blockLevel); audioLevelAt.store(millis());
         if (!firstSampleAt.load()) firstSampleAt.store(millis());
+        wakeDisplay();
       }
       uint32_t lastWrite = millis();
       while (offset < total && !cancelled(generation)) {
@@ -419,6 +529,7 @@ void playbackTask(void*) {
         if (error != ESP_OK && error != ESP_ERR_TIMEOUT) { failPipeline(generation, "I2S 播放失败"); break; }
         if (!written && millis() - lastWrite > 2000) { failPipeline(generation, "I2S 写入长时间无进展"); break; }
       }
+      if (!cancelled(generation)) { audioLevel.store(blockLevel); audioLevelAt.store(millis()); }
       cursor += monoBytes;
     }
     if (!cancelled(generation)) playedParts.store(part.index);
@@ -441,10 +552,16 @@ bool pollTask() {
   epoch.fetch_add(1); firstDownloadElapsedMs.store(UINT32_MAX);
   portEXIT_CRITICAL(&firstDownloadMux);
   acceptedAt = millis(); firstSampleAt.store(0); playedParts.store(0);
+  jobOledFrames = oledFrameCount.load(); jobOledBytes = oledPayloadBytes.load(); oledMaxFlushUs.store(0);
+  audioLevel.store(0); audioLevelAt.store(0);
   pipelineFailed.store(false); pipelineError[0] = 0; waitingForAudio.store(true);
   cancelPlayback.store(false); volume.store(constrain(task["volume"] | 70, 0, 100));
   // Claiming already establishes the lease. Start fetching audio immediately;
   // the OLED worker and first periodic heartbeat run independently afterwards.
+  requestedDisplay.theme = parseTheme(task["display_mode"] | "buddy");
+  const char* status = task["status"] | "synthesizing";
+  setScenePhase(!strcmp(status, "queued") ? OledScene::Phase::Queued :
+                !strcmp(status, "completed") ? OledScene::Phase::Buffering : OledScene::Phase::Thinking);
   audioBusy.store(true); show(job.text, "Generating");
   return true;
 }
@@ -458,6 +575,11 @@ bool fetchManifest(uint32_t& queuedThrough, bool& endQueued) {
     return false;
   }
   volume.store(constrain(response["volume"] | 70, 0, 100));
+  if (!firstSampleAt.load()) {
+    const char* status = response["status"] | "synthesizing";
+    setScenePhase(!strcmp(status, "queued") ? OledScene::Phase::Queued :
+                  !strcmp(status, "completed") ? OledScene::Phase::Buffering : OledScene::Phase::Thinking);
+  }
   if ((response["cancel"] | false) || !response["error"].isNull()) {
     if (!response["error"].isNull()) failPipeline(epoch.load(), response["error"] | "语音生成失败");
     else cancelPlayback.store(true);
@@ -490,7 +612,7 @@ void setup() {
   if (!downloadQueue || !audioQueue || !resultQueue) { Serial.println("Queue allocation failed"); while (true) delay(1000); }
   if (displayReady) {
     displayQueue = xQueueCreate(1, sizeof(DisplayState));
-    if (!displayQueue || xTaskCreatePinnedToCore(displayTask, "oled", 6144, nullptr, 1, nullptr, 0) != pdPASS) {
+    if (!displayQueue || xTaskCreatePinnedToCore(displayTask, "oled", 6144, nullptr, 1, &displayWorker, 0) != pdPASS) {
       Serial.println("OLED worker allocation failed"); while (true) delay(1000);
     }
   }
@@ -506,16 +628,22 @@ void loop() {
   static PlayResult finish{};
   if (xQueueReceive(resultQueue, &finish, 0) == pdTRUE) {
     finishPending = true; audioBusy.store(false);
+    audioLevel.store(0);
+    setScenePhase(finish.cancelled ? OledScene::Phase::Stopped : finish.ok ? OledScene::Phase::Finished : OledScene::Phase::Error);
     showHeading(finish.cancelled ? "Stopped" : finish.ok ? "Finished" : "Audio error");
+    Serial.printf("[OLED] frames=%lu payload_bytes=%lu max_flush_us=%lu (audio finished)\n",
+      static_cast<unsigned long>(oledFrameCount.load() - jobOledFrames),
+      static_cast<unsigned long>(oledPayloadBytes.load() - jobOledBytes),
+      static_cast<unsigned long>(oledMaxFlushUs.load()));
   }
   if (WiFi.status() != WL_CONNECTED) {
-    if (wasConnected) { wasConnected = false; showHeading("WiFi reconnecting"); }
+    if (wasConnected) { wasConnected = false; if (!audioBusy.load()) setScenePhase(OledScene::Phase::Error); showHeading("WiFi reconnecting"); }
     if (millis() - reconnectAt > 10000) { reconnectAt = millis(); WiFi.reconnect(); }
     delay(2); return;
   }
   if (!wasConnected) {
     wasConnected = true; Serial.printf("WiFi connected: %s\n", WiFi.localIP().toString().c_str());
-    if (!active.id[0]) show((String("等待语音任务\nIP: ") + WiFi.localIP().toString()).c_str(), "Ready");
+    if (!active.id[0]) { setScenePhase(OledScene::Phase::Idle); show((String("等待语音任务\nIP: ") + WiFi.localIP().toString()).c_str(), "Ready"); }
   }
   if (finishPending) {
     if (millis() - heartbeatAt > 300) {

@@ -3,8 +3,22 @@ const STATE={queued:'等待推理',loading:'加载模型',synthesizing:'生成�
 const DELIVERY={pending:'等待开发板领取',leased:'开发板已领取',waiting:'开发板等待音频',buffering:'开发板正在缓冲',playing:'开发板播放中',delivered:'开发板播放完成',error:'开发板播放失败',cancelled:'设备播放已停止',expired:'设备任务已过期'};
 const deliveryText=job=>job.delivery?(job.device_delivery_simulated?'模拟 · ':'')+(DELIVERY[job.delivery]||job.delivery):'';
 const secs=value=>value==null?'—':Number(value).toFixed(2)+' s';
+const MODES=[{id:'buddy',name:'声波伙伴',hint:'眨眼、动嘴，陪你说完一句话'},{id:'wave',name:'声波电台',hint:'小声柱跟着音量一起跳'},{id:'text',name:'专注文字',hint:'文字铺满屏幕，安静阅读'}];
+function screenLine(job){
+  if(job.status==='failed'||job.delivery==='error')return '出了点小状况，等你重新开始。';
+  if(job.status==='cancelled'||job.delivery==='cancelled')return '收到，先安静一会儿。';
+  if(job.delivery==='expired')return '这封语音已过期，再送来一次吧。';
+  if(job.delivery==='delivered')return job.device_delivery_simulated?'模拟接收完成，实物播放尚未确认。':'读完啦，送你一颗小星星。';
+  if(job.delivery==='playing')return job.device_delivery_simulated?'模拟接收中，等待实物伙伴。':'正在读给你听，嘴巴跟着声音动。';
+  if(job.delivery==='buffering')return '等下一口声音接上，文字还在这里。';
+  if(job.status==='queued')return '文字排好队啦，马上轮到我。';
+  if(job.status==='loading')return '正在唤醒声音，先眨眨眼。';
+  if(job.status==='synthesizing')return '给文字装上声音，第一口好了就开说。';
+  return job.device_id?'声音准备好了，等小伙伴接收。':'声音准备好了，点试听听看。';
+}
 Page({
   data:{text:'你好，欢迎来到我的语音实验室。今天也要保持好心情，去发现生活里的小美好。',voices:[],selectedVoice:'Serena',speed:1,speedLabel:'1.00×',deviceVolume:70,
+    displayMode:'buddy',displayModes:MODES,screenHint:'我准备好啦，等你送来一句话。',
     sendDevice:true,useCache:true,autoPlayParts:false,busy:false,stage:'准备就绪',modelState:'连接中',hardware:'',deviceOnline:false,deviceSimulated:false,error:'',result:null,history:[],playing:false,
     streamStatus:'',browserFirstLabel:'—',settingsOpen:false,baseUrl:'',clientToken:'',deviceId:'esp32_01',elapsed:'—',loadBusy:false,connected:false},
   onLoad(){
@@ -32,6 +46,7 @@ Page({
   async refreshStatus(){try{const [status,devices]=await Promise.all([api.request('/api/status'),api.request('/api/devices')]);if(!this.alive)return;const device=devices[0];this.setData({connected:true,modelState:status.engine.message,hardware:status.hardware.gpu_name||'CPU 模式',deviceOnline:device.online,deviceSimulated:!!device.simulated,deviceVolume:device.volume,loadBusy:['loading','warming'].includes(status.engine.state)});if(status.engine.error)this.setData({error:status.engine.error});}catch(e){if(this.alive)this.setData({connected:false,modelState:'连接中断',error:e.message});}},
   inputText(e){this.setData({text:e.detail.value});},
   selectVoice(e){this.setData({selectedVoice:e.currentTarget.dataset.id});},
+  selectDisplayMode(e){const id=e.currentTarget.dataset.id;if(MODES.some(mode=>mode.id===id))this.setData({displayMode:id});},
   changeSpeed(e){this.setData({speed:e.detail.value/100,speedLabel:(e.detail.value/100).toFixed(2)+'×'});},
   toggleDevice(e){this.setData({sendDevice:e.detail.value});},toggleCache(e){this.setData({useCache:e.detail.value});},
   toggleAutoPlay(e){
@@ -55,7 +70,7 @@ Page({
     this.started=Date.now();this.firstPlaybackMs=null;this.pollFailures=0;this.stopRequested=false;this.autoActive=this.data.autoPlayParts;
     this.setData({busy:true,error:'',result:null,stage:'提交任务',browserFirstLabel:'—',streamStatus:this.autoActive?'等待语音首包':''});this.beginElapsed();
     try{
-      const job=await api.request('/api/jobs','POST',{text:this.data.text.trim(),voice:this.data.selectedVoice,language:'Chinese',speed:this.data.speed,use_cache:this.data.useCache,device_id:this.data.sendDevice?this.data.deviceId:null});
+      const job=await api.request('/api/jobs','POST',{text:this.data.text.trim(),voice:this.data.selectedVoice,language:'Chinese',speed:this.data.speed,use_cache:this.data.useCache,display_mode:this.data.displayMode||'buddy',device_id:this.data.sendDevice?this.data.deviceId:null});
       if(!this.alive)return;
       this.currentId=job.id;this.applyJob(job);this.pollJob(job.id);
       if(this.stopRequested)await this.stop();
@@ -67,7 +82,7 @@ Page({
     const busy=!['completed','failed','cancelled'].includes(job.status);
     const result=Object.assign({},job,{firstLabel:secs(job.first_audio_seconds),inferenceLabel:secs(job.inference_seconds),durationLabel:secs(job.duration),totalLabel:secs(job.total_seconds),rtfLabel:job.rtf==null?'—':job.rtf.toFixed(2),deliveryLabel:deliveryText(job),hasParts:job.parts.length>0,
       queuedLabel:secs(job.queued_seconds),deviceFirstLabel:secs(job.device_first_audio_seconds),deviceDownloadLabel:secs(job.device_download_seconds)});
-    const update={busy,stage:job.stage||STATE[job.status],error:job.error||job.device_error||''};
+    const update={busy,stage:job.stage||STATE[job.status],screenHint:screenLine(job),error:job.error||job.device_error||''};
     if(!previous||previous.id!==job.id)update.result=result;
     else{
       for(const key of Object.keys(result))if(key!=='parts'&&result[key]!==previous[key])update['result.'+key]=result[key];

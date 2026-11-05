@@ -68,7 +68,8 @@ def create_device_router(*, config: dict, get_jobs: Callable, get_devices: Calla
             return {'id': job['id'], 'status': job.get('status'), 'parts': [],
                     'available_parts': len(job.get('parts', [])), 'finished': True,
                     'cancel': True, 'error': job.get('device_error') if job.get('delivery') == 'error' else None,
-                    'volume': record['volume'], 'poll_after_ms': 60, 'delivery_closed': True}
+                    'volume': record['volume'], 'poll_after_ms': 60, 'delivery_closed': True,
+                    'display_mode': job.get('display_mode', 'buddy')}
         source = list(job.get('parts', []))
         # Backward compatibility for an old completed cache with only one WAV.
         if not source and job.get('status') == 'completed' and job.get('audio_url'):
@@ -83,6 +84,7 @@ def create_device_router(*, config: dict, get_jobs: Callable, get_devices: Calla
             'available_parts': len(source), 'finished': terminal,
             'cancel': cancelled, 'error': job.get('error') if job.get('status') == 'failed' else None,
             'volume': record['volume'], 'poll_after_ms': 60,
+            'display_mode': job.get('display_mode', 'buddy'),
         }
 
     @router.get('/{device_id}/next')
@@ -123,6 +125,7 @@ def create_device_router(*, config: dict, get_jobs: Callable, get_devices: Calla
                             'audio_url': job.get('audio_url'), 'sample_rate': job.get('sample_rate'),
                             'volume': get_devices()[device_id]['volume'], 'protocol': 2,
                             'created_at': job['created_at'],
+                            'display_mode': job.get('display_mode', 'buddy'), 'status': job.get('status'),
                         }}
             if time.monotonic() >= deadline:
                 return {'task': None}
